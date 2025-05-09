@@ -21,15 +21,13 @@ This script converts a website, particularly those structured like ReadTheDocs p
 ## Prerequisites
 
 - Python 3.x
-- `requests` library: `pip install requests`
-- `beautifulsoup4` library: `pip install beautifulsoup4`
-- `python-dotenv` library: `pip install python-dotenv` (for managing API keys)
+- Dependencies listed in `requirements.txt`
 
 ## Setup
 
 1.  **Install Dependencies**:
     ```bash
-    pip install requests beautifulsoup4 python-dotenv
+    pip install -r requirements.txt
     ```
 
 2.  **API Key**:
