@@ -115,12 +115,23 @@ def crawl_and_list_internal_links(start_url: str, max_depth: int):
             print(f"  An unexpected error occurred while processing {current_url}: {e}")
 
     if all_discovered_links:
-        print(f"\n--- Discovered {len(all_discovered_links)} unique internal links (up to depth {max_depth}) ---")
+        # Print all the discovered links first
+        print(f"\n--- Listing {len(all_discovered_links)} unique internal links discovered up to depth {max_depth} for {start_url} ---")
         for link in sorted(list(all_discovered_links)):
             print(link)
-        print("--- End of link list ---")
+        
+        # Print a clear summary at the very end
+        print(f"\n--- Summary of Link Discovery ---")
+        print(f"Starting URL: {start_url}")
+        print(f"Requested Crawl Depth: {max_depth}")
+        print(f"Total Unique Internal Links Discovered: {len(all_discovered_links)}")
+        print("--- End of Link Discovery Report ---")
     else:
+        print(f"\n--- Summary of Link Discovery ---")
+        print(f"Starting URL: {start_url}")
+        print(f"Requested Crawl Depth: {max_depth}")
         print("No internal links found.")
+        print("--- End of Link Discovery Report ---")
 
 def main():
     load_dotenv()
