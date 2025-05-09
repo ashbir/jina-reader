@@ -246,48 +246,74 @@ def crawl_and_list_internal_links(start_url: str, max_depth: int, parent_level: 
 def generate_local_filepath(normalized_url: str, output_dir: str) -> str:
     parsed_url = urlparse(normalized_url)
     
-    filename_base = parsed_url.netloc
-    path_cleaned = parsed_url.path.strip('/') 
+    # Start with the domain part for the base directory or filename component
+    domain_part = parsed_url.netloc
     
+    path_cleaned = parsed_url.path.strip('/')
+    
+    # Initialize directory_path within the main output_dir
+    current_dir_path = os.path.join(output_dir, domain_part)
+    
+    filename_base = "index" # Default filename if path is empty or ends in a directory
+
     if path_cleaned:
         path_segments = path_cleaned.split('/')
+        
+        # Determine if the last segment is a file or directory
         last_segment = path_segments[-1]
         
-        # Check if the last segment has a common web extension
-        if '.' in last_segment:
+        # Check for common web extensions to identify a file
+        if '.' in last_segment and any(last_segment.lower().endswith(ext) for ext in ['.html', '.htm', '.md', '.txt']):
             name_part, ext_part = os.path.splitext(last_segment)
-            if ext_part.lower() in ['.html', '.htm']:
-                if name_part: # If "index.html" becomes "index"
-                    path_segments[-1] = name_part
-                else: # If ".html" was the segment or became empty after stripping
-                    path_segments.pop() # Remove empty segment
-                    if not path_segments: # If path becomes empty (e.g. /index.html)
-                         filename_base += "_index" # Handled by else block later if path_cleaned is now empty
-        
-        # Reconstruct cleaned path part
-        # Filter out empty segments that might arise if a segment was e.g. "index.html" and became empty
-        valid_segments = [seg for seg in path_segments if seg]
-        if valid_segments:
-            filename_base += "_" + "_".join(valid_segments)
-        elif parsed_url.path.strip('/'): # Original path was not empty, but segments are now (e.g. /index.html)
-            filename_base += "_index"
+            filename_base = name_part if name_part else "index" # Use "index" if name_part is empty (e.g. ".html")
+            # Directory path will be the segments before the filename
+            if len(path_segments) > 1:
+                current_dir_path = os.path.join(current_dir_path, *path_segments[:-1])
+        else:
+            # If no extension or not a recognized file extension, assume it's a directory path
+            # The full path becomes part of the directory structure
+            current_dir_path = os.path.join(current_dir_path, *path_segments)
+            # filename_base remains "index" for the implicit index file of this directory
             
-    else: # Root URL (e.g. http://example.com/)
-        filename_base += "_index"
-        
-    # Sanitize the entire base name
-    # Allow alphanumeric, underscore, hyphen. Replace others with underscore.
-    safe_filename_base = re.sub(r'[^a-zA-Z0-9_-]', '_', filename_base)
-    # Replace multiple underscores with a single underscore
-    safe_filename_base = re.sub(r'_+', '_', safe_filename_base)
-    # Remove leading/trailing underscores
-    safe_filename_base = safe_filename_base.strip('_')
+    # Sanitize each component of the directory path and the filename
+    # Sanitize domain_part for the first level directory
+    safe_domain_part = re.sub(r'[^a-zA-Z0-9_-]', '_', domain_part)
+    safe_domain_part = re.sub(r'_+', '_', safe_domain_part).strip('_') or "domain"
 
-    if not safe_filename_base: # Should be rare, but as a fallback
-        safe_filename_base = "untitled_page"
+    # Reconstruct current_dir_path with sanitized components
+    # The first part of current_dir_path was output_dir, then domain_part
+    # We need to split the path that was appended to domain_part and sanitize those.
+    relative_path_from_domain = os.path.relpath(current_dir_path, os.path.join(output_dir, domain_part))
+    
+    if relative_path_from_domain and relative_path_from_domain != '.':
+        sanitized_path_segments = []
+        for segment in relative_path_from_domain.split(os.sep):
+            safe_segment = re.sub(r'[^a-zA-Z0-9_-]', '_', segment)
+            safe_segment = re.sub(r'_+', '_', safe_segment).strip('_')
+            if safe_segment: # Avoid empty segments if original was like "foo__bar" -> "foo_bar"
+                sanitized_path_segments.append(safe_segment)
+        
+        if sanitized_path_segments:
+            current_dir_path = os.path.join(output_dir, safe_domain_part, *sanitized_path_segments)
+        else: # Path was like / or /index.html, resulting in no further segments
+            current_dir_path = os.path.join(output_dir, safe_domain_part)
+    else: # Path was like / or /index.html, resulting in no further segments
+        current_dir_path = os.path.join(output_dir, safe_domain_part)
+
+
+    # Sanitize the base filename
+    safe_filename_base = re.sub(r'[^a-zA-Z0-9_-]', '_', filename_base)
+    safe_filename_base = re.sub(r'_+', '_', safe_filename_base).strip('_')
+    
+    if not safe_filename_base: # Fallback if sanitization results in empty string
+        safe_filename_base = "index"
 
     final_filename = safe_filename_base + ".md"
-    return os.path.join(output_dir, final_filename)
+    
+    # The directory creation will be handled just before writing the file
+    # os.makedirs(current_dir_path, exist_ok=True) # Moved to main loop
+
+    return os.path.join(current_dir_path, final_filename)
 
 # New function to convert internal links in Markdown to relative paths
 def convert_markdown_links(
@@ -392,10 +418,11 @@ def main():
     # Create output directory
     output_dir = args.output
     try:
-        os.makedirs(output_dir, exist_ok=True)
-        print(f"Markdown files will be saved in: {os.path.abspath(output_dir)}")
+        # Base output directory is created here. Subdirectories will be created as needed.
+        os.makedirs(output_dir, exist_ok=True) 
+        print(f"Base output directory: {os.path.abspath(output_dir)}")
     except OSError as e:
-        print(f"Error creating output directory {output_dir}: {e}")
+        print(f"Error creating base output directory {output_dir}: {e}")
         return
 
     # all_markdown_content = [] # Removed: content will be saved to individual files
@@ -440,6 +467,12 @@ def main():
             )
             
             try:
+                # Ensure the directory for the file exists before writing
+                file_directory = os.path.dirname(local_filepath)
+                if not os.path.exists(file_directory):
+                    os.makedirs(file_directory, exist_ok=True)
+                    print(f"  Created directory: {file_directory}")
+
                 with open(local_filepath, "w", encoding="utf-8") as f:
                     f.write(converted_markdown)
                 print(f"  Successfully saved Markdown to: {local_filepath}")
