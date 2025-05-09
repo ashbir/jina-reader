@@ -85,7 +85,11 @@ def find_internal_links(html_content: str, base_url: str, crawl_root_url_prefix:
         if (parsed_normalized_full_url.scheme in ['http', 'https'] and
                 parsed_normalized_full_url.netloc == parsed_base_url.netloc and
                 normalized_full_url != base_url and # Compare normalized forms
-                normalized_full_url.startswith(crawl_root_url_prefix)): # New check for parent path restriction
+                # Ensure the URL is truly under the crawl_root_url_prefix.
+                # crawl_root_url_prefix is already normalized (e.g., "https://example.com/docs/"),
+                # so startswith is sufficient.
+                normalized_full_url.startswith(crawl_root_url_prefix)
+            ):
             
             path_part = parsed_normalized_full_url.path.strip('/')
             if not path_part: # Root path, if different from base_url, could be relevant
@@ -100,37 +104,53 @@ def find_internal_links(html_content: str, base_url: str, crawl_root_url_prefix:
 
 def crawl_and_list_internal_links(start_url: str, max_depth: int):
     """Crawls a website starting from start_url up to max_depth and lists all unique internal links found."""
-    print(f"Starting link discovery crawl from: {start_url} up to depth: {max_depth}")
+    
+    # Normalize the initial start_url
+    normalized_start_url = normalize_url_for_tracking(start_url)
+    print(f"Starting link discovery crawl from: {normalized_start_url} up to depth: {max_depth}")
 
-    # (url, current_depth)
-    urls_to_visit = collections.deque([(start_url, 0)]) 
-    # URLs we have added to queue to fetch its content, to avoid re-fetching for link extraction
-    visited_urls_for_fetching = {start_url} 
-    # All unique links encountered during the crawl (includes pages visited and links found on them)
+    # (url, current_depth) - url here is normalized
+    urls_to_visit = collections.deque([(normalized_start_url, 0)]) 
+    # URLs we have added to queue to fetch its content (normalized), to avoid re-fetching for link extraction
+    visited_urls_for_fetching = {normalized_start_url} 
+    # All unique normalized links encountered during the crawl
     all_discovered_links = set()
 
     while urls_to_visit:
-        current_url, current_depth = urls_to_visit.popleft()
-        all_discovered_links.add(current_url) # Add the page being processed as a discovered link
+        current_url, current_depth = urls_to_visit.popleft() # current_url is already normalized
+        all_discovered_links.add(current_url) # Add the normalized page being processed
 
         print(f"Fetching links from: {current_url} (depth {current_depth}) ")
         try:
             html_response_headers = {"User-Agent": "Mozilla/5.0 (compatible; PythonLinkCrawler/1.1)"}
+            # Fetch using the current_url (which is normalized). Web servers typically ignore fragments for GET.
             response = requests.get(current_url, timeout=30, headers=html_response_headers)
             response.raise_for_status()
             page_html_content = response.text
             
-            # Find links on the current page
-            links_on_page = find_internal_links(page_html_content, current_url, start_url) # Pass normalized_start_url as crawl_root_url_prefix
-            all_discovered_links.update(links_on_page) # Add all links found on this page
+            # find_internal_links expects the base_url for urljoin (current_url is fine as it's normalized)
+            # and crawl_root_url_prefix (normalized_start_url).
+            # Links returned by find_internal_links are raw (can have fragments).
+            raw_links_on_page = find_internal_links(page_html_content, current_url, normalized_start_url) 
+            
+            current_page_normalized_links = set()
+            for raw_link in raw_links_on_page:
+                normalized_link = normalize_url_for_tracking(raw_link)
+                current_page_normalized_links.add(normalized_link)
+                # Add to all_discovered_links as well, ensuring it only contains normalized URLs
+                all_discovered_links.add(normalized_link)
 
-            # If we haven't reached max_depth, add new unvisited links to the queue
+
+            # If we haven't reached max_depth, add new unvisited normalized links to the queue
             if current_depth < max_depth:
-                for link in links_on_page:
-                    if link not in visited_urls_for_fetching:
-                        visited_urls_for_fetching.add(link)
-                        urls_to_visit.append((link, current_depth + 1))
-                        # print(f"  Queued for depth {current_depth + 1}: {link}")
+                for norm_link in current_page_normalized_links: # Iterate over normalized links from current page
+                    if norm_link not in visited_urls_for_fetching:
+                        # Ensure the link is truly under the crawl_root_url_prefix before adding to queue
+                        # normalized_start_url is the normalized root prefix (e.g., "https://example.com/docs/")
+                        if norm_link.startswith(normalized_start_url): # Corrected condition
+                            visited_urls_for_fetching.add(norm_link)
+                            urls_to_visit.append((norm_link, current_depth + 1))
+                            # print(f"  Queued for depth {current_depth + 1}: {norm_link}")
                         
         except requests.exceptions.RequestException as e:
             print(f"  Failed to fetch HTML from {current_url}: {e}")
@@ -139,19 +159,19 @@ def crawl_and_list_internal_links(start_url: str, max_depth: int):
 
     if all_discovered_links:
         # Print all the discovered links first
-        print(f"\n--- Listing {len(all_discovered_links)} unique internal links discovered up to depth {max_depth} for {start_url} ---")
-        for link in sorted(list(all_discovered_links)):
+        print(f"\n--- Listing {len(all_discovered_links)} unique internal links discovered up to depth {max_depth} for {normalized_start_url} ---")
+        for link in sorted(list(all_discovered_links)): # Links are already normalized here
             print(link)
         
         # Print a clear summary at the very end
         print(f"\n--- Summary of Link Discovery ---")
-        print(f"Starting URL: {start_url}")
+        print(f"Starting URL: {normalized_start_url}") # Use normalized_start_url for consistency
         print(f"Requested Crawl Depth: {max_depth}")
         print(f"Total Unique Internal Links Discovered: {len(all_discovered_links)}")
         print("--- End of Link Discovery Report ---")
     else:
         print(f"\n--- Summary of Link Discovery ---")
-        print(f"Starting URL: {start_url}")
+        print(f"Starting URL: {normalized_start_url}") # Use normalized_start_url
         print(f"Requested Crawl Depth: {max_depth}")
         print("No internal links found.")
         print("--- End of Link Discovery Report ---")
@@ -232,13 +252,20 @@ def main():
                 page_html_content = response.text
                 
                 # Pass start_url (which is the normalized root for this crawl) as crawl_root_url_prefix
-                internal_links = find_internal_links(page_html_content, current_url, start_url) 
-                print(f"Found {len(internal_links)} potential links on {current_url}.")
-                for link in internal_links: 
-                    if link not in visited_urls:
-                        visited_urls.add(link)
-                        urls_to_visit.append(link)
-                        # print(f"  Queued: {link}")
+                # For the main markdown generation, we also need to ensure that the links we follow are normalized
+                # and that we use normalized URLs for visited_urls tracking.
+                
+                raw_internal_links = find_internal_links(page_html_content, current_url, normalize_url_for_tracking(start_url)) 
+                print(f"Found {len(raw_internal_links)} potential links on {current_url}.")
+                for raw_link in raw_internal_links: 
+                    normalized_link = normalize_url_for_tracking(raw_link)
+                    if normalized_link not in visited_urls: # visited_urls should store normalized URLs
+                        # Ensure the link is truly under the crawl_root_url_prefix before adding to queue
+                        normalized_crawl_root = normalize_url_for_tracking(start_url)
+                        if normalized_link.startswith(normalized_crawl_root): # Corrected condition
+                            visited_urls.add(normalized_link) # Add normalized link to visited_urls
+                            urls_to_visit.append(normalized_link) # Add normalized link to queue
+                            # print(f"  Queued: {normalized_link}")
             except requests.exceptions.RequestException as e:
                 print(f"Failed to fetch HTML for link discovery from {current_url}: {e}")
         
