@@ -103,16 +103,41 @@ def find_internal_links(html_content: str, base_url: str, crawl_root_url_prefix:
                 links.add(full_url)
     return links
 
+# New helper function to calculate parent-aware crawl root
+def get_parent_aware_crawl_root(normalized_url: str, parent_level: int) -> str:
+    if parent_level <= 0:
+        return normalized_url
+
+    parsed = urlparse(normalized_url)
+    # normalized_url is expected to have a trailing slash for directories,
+    # e.g., "https://example.com/docs/foo/" or "https://example.com/"
+    
+    path_segments = [seg for seg in parsed.path.split('/') if seg] # Filters out empty strings
+
+    num_segments_to_keep = max(0, len(path_segments) - parent_level)
+    kept_segments = path_segments[:num_segments_to_keep]
+
+    new_path = "/"
+    if kept_segments:
+        new_path += "/".join(kept_segments) + "/"
+    # If kept_segments is empty, new_path remains "/" which is correct for the domain root.
+    
+    return urlunparse(parsed._replace(path=new_path))
+
 # New helper function to discover links
 def _get_discovered_links(
     initial_url: str, 
     max_depth: int, 
+    parent_level: int, # Added parent_level
     user_agent: str,
     enable_logging: bool = True
 ) -> set[str]:
     
     normalized_start_url = normalize_url_for_tracking(initial_url)
-    # Caller functions (crawl_and_list_internal_links and main) will print their own introductory messages.
+    effective_crawl_root_prefix = get_parent_aware_crawl_root(normalized_start_url, parent_level)
+    
+    if enable_logging and parent_level > 0:
+        print(f"Effective crawl root for link discovery: {effective_crawl_root_prefix}")
 
     urls_to_visit = collections.deque([(normalized_start_url, 0)]) 
     visited_urls_for_fetching = {normalized_start_url} 
@@ -120,6 +145,12 @@ def _get_discovered_links(
 
     while urls_to_visit:
         current_url, current_depth = urls_to_visit.popleft() # current_url is already normalized
+        
+        # Only add current_url to all_discovered_links if it's within the effective root
+        if not current_url.startswith(effective_crawl_root_prefix):
+            if enable_logging:
+                print(f"Skipping {current_url} as it's outside the effective crawl root {effective_crawl_root_prefix}")
+            continue
         all_discovered_links.add(current_url) 
 
         if enable_logging:
@@ -133,23 +164,23 @@ def _get_discovered_links(
             page_html_content = response.text
             
             # find_internal_links expects the base_url for urljoin (current_url is fine as it's normalized)
-            # and crawl_root_url_prefix (normalized_start_url, which is the root for this discovery).
-            raw_links_on_page = find_internal_links(page_html_content, current_url, normalized_start_url) 
+            # and crawl_root_url_prefix (effective_crawl_root_prefix).
+            raw_links_on_page = find_internal_links(page_html_content, current_url, effective_crawl_root_prefix) 
             
             current_page_normalized_links = set()
             for raw_link in raw_links_on_page:
                 normalized_link = normalize_url_for_tracking(raw_link)
                 current_page_normalized_links.add(normalized_link)
                 # Add to all_discovered_links as well, ensuring it only contains normalized URLs
+                # that are within the effective_crawl_root_prefix (guaranteed by find_internal_links)
                 all_discovered_links.add(normalized_link)
 
             # If we haven't reached max_depth, add new unvisited normalized links to the queue
             if current_depth < max_depth:
                 for norm_link in current_page_normalized_links: # Iterate over normalized links from current page
                     if norm_link not in visited_urls_for_fetching:
-                        # Ensure the link is truly under the crawl_root_url_prefix before adding to queue
-                        # normalized_start_url is the normalized root prefix (e.g., "https://example.com/docs/")
-                        if norm_link.startswith(normalized_start_url): 
+                        # Ensure the link is truly under the effective_crawl_root_prefix before adding to queue
+                        if norm_link.startswith(effective_crawl_root_prefix): 
                             visited_urls_for_fetching.add(norm_link)
                             urls_to_visit.append((norm_link, current_depth + 1))
                             # The original commented-out print for "Queued for depth..." is kept commented out.
@@ -163,12 +194,12 @@ def _get_discovered_links(
                 
     return all_discovered_links
 
-def crawl_and_list_internal_links(start_url: str, max_depth: int):
+def crawl_and_list_internal_links(start_url: str, max_depth: int, parent_level: int): # Added parent_level
     """Crawls a website starting from start_url up to max_depth and lists all unique internal links found."""
     
     # Normalize the initial start_url for the introductory print message
     normalized_start_url_for_print = normalize_url_for_tracking(start_url)
-    print(f"Starting link discovery crawl from: {normalized_start_url_for_print} up to depth: {max_depth}")
+    print(f"Starting link discovery crawl from: {normalized_start_url_for_print} up to depth: {max_depth}, parent level: {parent_level}")
 
     # Call the refactored helper function to get the links.
     # Logging within _get_discovered_links is enabled to maintain original behavior.
@@ -176,6 +207,7 @@ def crawl_and_list_internal_links(start_url: str, max_depth: int):
     all_discovered_links = _get_discovered_links(
         start_url,
         max_depth,
+        parent_level, # Pass parent_level
         user_agent="Mozilla/5.0 (compatible; PythonLinkCrawler/1.1)",
         enable_logging=True 
     )
@@ -313,11 +345,11 @@ def main():
         description="Convert a ReadTheDocs-like website to Markdown or list internal links with crawling."
     )
     parser.add_argument("url", nargs='?', default=None, help="The starting URL for conversion (required if not using --list-links).")
-    # Modified --output argument
     parser.add_argument("-o", "--output", default="markdown_output", help="The output directory for Markdown files (default: markdown_output).")
     parser.add_argument("--api_key", help="Jina AI API Key. If not provided, it will try to use the JINA_AI_API_KEY environment variable.")
     parser.add_argument("--list-links", metavar="URL", help="Fetch the specified URL and list all discoverable internal links by crawling, then exit.")
     parser.add_argument("--crawl-depth", type=int, default=0, help="Depth for link discovery when using --list-links or for Markdown conversion. 0 means only links on the initial page, 1 means links on those pages too, etc. (default: 0).")
+    parser.add_argument("--parent", type=int, default=0, help="Number of parent directories to allow links to go up to (default: 0).") # Added --parent argument
 
     args = parser.parse_args()
 
@@ -328,7 +360,7 @@ def main():
             print(f"Warning: URL for --list-links ({list_start_url}) does not start with http:// or https://. Prepending https://")
             list_start_url = "https://" + list_start_url
         
-        crawl_and_list_internal_links(list_start_url, args.crawl_depth)
+        crawl_and_list_internal_links(list_start_url, args.crawl_depth, args.parent) # Pass args.parent
         return
 
     if not args.url:
@@ -357,12 +389,13 @@ def main():
 
     # all_markdown_content = [] # Removed: content will be saved to individual files
 
-    print(f"Starting conversion for: {start_url}, with crawl depth: {args.crawl_depth}")
+    print(f"Starting conversion for: {start_url}, with crawl depth: {args.crawl_depth}, parent level: {args.parent}")
     
     print("Discovering all pages to convert...")
     links_to_convert = _get_discovered_links(
         start_url,
         args.crawl_depth,
+        args.parent, # Pass args.parent
         user_agent="Mozilla/5.0 (compatible; PythonDocsCrawler/1.0)", 
         enable_logging=True 
     )
