@@ -102,35 +102,37 @@ def find_internal_links(html_content: str, base_url: str, crawl_root_url_prefix:
                 links.add(full_url)
     return links
 
-def crawl_and_list_internal_links(start_url: str, max_depth: int):
-    """Crawls a website starting from start_url up to max_depth and lists all unique internal links found."""
+# New helper function to discover links
+def _get_discovered_links(
+    initial_url: str, 
+    max_depth: int, 
+    user_agent: str,
+    enable_logging: bool = True
+) -> set[str]:
     
-    # Normalize the initial start_url
-    normalized_start_url = normalize_url_for_tracking(start_url)
-    print(f"Starting link discovery crawl from: {normalized_start_url} up to depth: {max_depth}")
+    normalized_start_url = normalize_url_for_tracking(initial_url)
+    # Caller functions (crawl_and_list_internal_links and main) will print their own introductory messages.
 
-    # (url, current_depth) - url here is normalized
     urls_to_visit = collections.deque([(normalized_start_url, 0)]) 
-    # URLs we have added to queue to fetch its content (normalized), to avoid re-fetching for link extraction
     visited_urls_for_fetching = {normalized_start_url} 
-    # All unique normalized links encountered during the crawl
     all_discovered_links = set()
 
     while urls_to_visit:
         current_url, current_depth = urls_to_visit.popleft() # current_url is already normalized
-        all_discovered_links.add(current_url) # Add the normalized page being processed
+        all_discovered_links.add(current_url) 
 
-        print(f"Fetching links from: {current_url} (depth {current_depth}) ")
+        if enable_logging:
+            # This log matches the original one in crawl_and_list_internal_links
+            print(f"Fetching links from: {current_url} (depth {current_depth})")
+        
         try:
-            html_response_headers = {"User-Agent": "Mozilla/5.0 (compatible; PythonLinkCrawler/1.1)"}
-            # Fetch using the current_url (which is normalized). Web servers typically ignore fragments for GET.
+            html_response_headers = {"User-Agent": user_agent}
             response = requests.get(current_url, timeout=30, headers=html_response_headers)
             response.raise_for_status()
             page_html_content = response.text
             
             # find_internal_links expects the base_url for urljoin (current_url is fine as it's normalized)
-            # and crawl_root_url_prefix (normalized_start_url).
-            # Links returned by find_internal_links are raw (can have fragments).
+            # and crawl_root_url_prefix (normalized_start_url, which is the root for this discovery).
             raw_links_on_page = find_internal_links(page_html_content, current_url, normalized_start_url) 
             
             current_page_normalized_links = set()
@@ -140,38 +142,58 @@ def crawl_and_list_internal_links(start_url: str, max_depth: int):
                 # Add to all_discovered_links as well, ensuring it only contains normalized URLs
                 all_discovered_links.add(normalized_link)
 
-
             # If we haven't reached max_depth, add new unvisited normalized links to the queue
             if current_depth < max_depth:
                 for norm_link in current_page_normalized_links: # Iterate over normalized links from current page
                     if norm_link not in visited_urls_for_fetching:
                         # Ensure the link is truly under the crawl_root_url_prefix before adding to queue
                         # normalized_start_url is the normalized root prefix (e.g., "https://example.com/docs/")
-                        if norm_link.startswith(normalized_start_url): # Corrected condition
+                        if norm_link.startswith(normalized_start_url): 
                             visited_urls_for_fetching.add(norm_link)
                             urls_to_visit.append((norm_link, current_depth + 1))
-                            # print(f"  Queued for depth {current_depth + 1}: {norm_link}")
+                            # The original commented-out print for "Queued for depth..." is kept commented out.
                         
         except requests.exceptions.RequestException as e:
-            print(f"  Failed to fetch HTML from {current_url}: {e}")
+            if enable_logging: # These logs match the original ones
+                print(f"  Failed to fetch HTML from {current_url}: {e}")
         except Exception as e:
-            print(f"  An unexpected error occurred while processing {current_url}: {e}")
+            if enable_logging: # These logs match the original ones
+                print(f"  An unexpected error occurred while processing {current_url}: {e}")
+                
+    return all_discovered_links
 
+def crawl_and_list_internal_links(start_url: str, max_depth: int):
+    """Crawls a website starting from start_url up to max_depth and lists all unique internal links found."""
+    
+    # Normalize the initial start_url for the introductory print message
+    normalized_start_url_for_print = normalize_url_for_tracking(start_url)
+    print(f"Starting link discovery crawl from: {normalized_start_url_for_print} up to depth: {max_depth}")
+
+    # Call the refactored helper function to get the links.
+    # Logging within _get_discovered_links is enabled to maintain original behavior.
+    # User agent for this mode is "Mozilla/5.0 (compatible; PythonLinkCrawler/1.1)"
+    all_discovered_links = _get_discovered_links(
+        start_url,
+        max_depth,
+        user_agent="Mozilla/5.0 (compatible; PythonLinkCrawler/1.1)",
+        enable_logging=True 
+    )
+    
     if all_discovered_links:
         # Print all the discovered links first
-        print(f"\n--- Listing {len(all_discovered_links)} unique internal links discovered up to depth {max_depth} for {normalized_start_url} ---")
+        print(f"\n--- Listing {len(all_discovered_links)} unique internal links discovered up to depth {max_depth} for {normalized_start_url_for_print} ---")
         for link in sorted(list(all_discovered_links)): # Links are already normalized here
             print(link)
         
         # Print a clear summary at the very end
         print(f"\n--- Summary of Link Discovery ---")
-        print(f"Starting URL: {normalized_start_url}") # Use normalized_start_url for consistency
+        print(f"Starting URL: {normalized_start_url_for_print}") # Use normalized_start_url for consistency
         print(f"Requested Crawl Depth: {max_depth}")
         print(f"Total Unique Internal Links Discovered: {len(all_discovered_links)}")
         print("--- End of Link Discovery Report ---")
     else:
         print(f"\n--- Summary of Link Discovery ---")
-        print(f"Starting URL: {normalized_start_url}") # Use normalized_start_url
+        print(f"Starting URL: {normalized_start_url_for_print}") # Use normalized_start_url
         print(f"Requested Crawl Depth: {max_depth}")
         print("No internal links found.")
         print("--- End of Link Discovery Report ---")
@@ -185,9 +207,9 @@ def main():
     parser.add_argument("url", nargs='?', default=None, help="The starting URL for conversion (required if not using --list-links).")
     parser.add_argument("-o", "--output", default="output.md", help="The name of the output Markdown file (default: output.md).")
     parser.add_argument("--api_key", help="Jina AI API Key. If not provided, it will try to use the JINA_AI_API_KEY environment variable.")
-    parser.add_argument("--max_pages", type=int, default=10, help="Maximum number of pages to crawl and convert for Markdown generation (default: 10).")
+    # parser.add_argument("--max_pages", type=int, default=10, help="Maximum number of pages to crawl and convert for Markdown generation (default: 10).") # Removed
     parser.add_argument("--list-links", metavar="URL", help="Fetch the specified URL and list all discoverable internal links by crawling, then exit.")
-    parser.add_argument("--crawl-depth", type=int, default=0, help="Depth for link discovery when using --list-links. 0 means only links on the initial page, 1 means links on those pages too, etc. (default: 0).")
+    parser.add_argument("--crawl-depth", type=int, default=0, help="Depth for link discovery when using --list-links or for Markdown conversion. 0 means only links on the initial page, 1 means links on those pages too, etc. (default: 0).")
 
     args = parser.parse_args()
 
@@ -217,60 +239,53 @@ def main():
         start_url = args.url
 
     all_markdown_content = []
-    # Use a deque for BFS traversal
-    urls_to_visit = collections.deque([start_url])
-    # Set to keep track of URLs that have been added to the queue (to avoid re-adding)
-    # or have been processed.
-    visited_urls = {start_url} 
+    # Use a deque for BFS traversal # This comment is no longer relevant here
+    # urls_to_visit = collections.deque([start_url]) # Removed
+    # Set to keep track of URLs that have been added to the queue (to avoid re-adding) # This comment is no longer relevant here
+    # or have been processed. # This comment is no longer relevant here
+    # visited_urls = {start_url} # Removed
 
-    print(f"Starting crawl from: {start_url}. Max pages: {args.max_pages}")
+    print(f"Starting conversion for: {start_url}, with crawl depth: {args.crawl_depth}")
+    
+    # processed_pages_count = 0 # Will be re-introduced for iterating through discovered links
+
+    # 1. Discover all links based on crawl_depth
+    print("Discovering all pages to convert...")
+    # User agent for link discovery in conversion mode, as previously used in main's crawler part.
+    links_to_convert = _get_discovered_links(
+        start_url,
+        args.crawl_depth,
+        user_agent="Mozilla/5.0 (compatible; PythonDocsCrawler/1.0)", # UA from original main crawler
+        enable_logging=True # Set to False if link discovery phase should be quieter
+    )
+
+    if not links_to_convert:
+        print("No links discovered for conversion based on the crawl depth. Exiting.")
+        return
+
+    print(f"Found {len(links_to_convert)} unique pages to convert.")
 
     processed_pages_count = 0
-    while urls_to_visit and processed_pages_count < args.max_pages:
-        current_url = urls_to_visit.popleft()
-        
-        print(f"Processing page ({processed_pages_count + 1}/{args.max_pages}): {current_url}")
+    # Sort links for consistent processing order, though not strictly necessary
+    for current_url_to_convert in sorted(list(links_to_convert)):
+        # The max_pages limit is removed; all discovered links up to crawl_depth are processed.
+        print(f"Processing page ({processed_pages_count + 1}/{len(links_to_convert)}): {current_url_to_convert}")
 
-        # 1. Fetch Markdown content for the current page using Jina API
-        markdown_page_content = fetch_content_from_jina_api(current_url, api_key)
+        # Fetch Markdown content for the current page using Jina API
+        markdown_page_content = fetch_content_from_jina_api(current_url_to_convert, api_key)
         
         if markdown_page_content:
-            all_markdown_content.append(f"\n\n--- Page Source: {current_url} ---\n\n{markdown_page_content}")
+            all_markdown_content.append(f"\n\n--- Page Source: {current_url_to_convert} ---\n\n{markdown_page_content}")
             processed_pages_count += 1
         else:
-            print(f"Skipping {current_url} due to fetch error or empty content from Jina API.")
-            # If Jina fails, we might still want to crawl its links if we can get raw HTML
-            # For now, if Jina fails, we don't try to get links from it.
-
-        # 2. Fetch raw HTML of the current page to find new links (only if we need more pages)
-        if processed_pages_count < args.max_pages:
-            try:
-                # Use a common user-agent
-                html_response_headers = {"User-Agent": "Mozilla/5.0 (compatible; PythonDocsCrawler/1.0)"}
-                response = requests.get(current_url, timeout=30, headers=html_response_headers)
-                response.raise_for_status()
-                page_html_content = response.text
-                
-                # Pass start_url (which is the normalized root for this crawl) as crawl_root_url_prefix
-                # For the main markdown generation, we also need to ensure that the links we follow are normalized
-                # and that we use normalized URLs for visited_urls tracking.
-                
-                raw_internal_links = find_internal_links(page_html_content, current_url, normalize_url_for_tracking(start_url)) 
-                print(f"Found {len(raw_internal_links)} potential links on {current_url}.")
-                for raw_link in raw_internal_links: 
-                    normalized_link = normalize_url_for_tracking(raw_link)
-                    if normalized_link not in visited_urls: # visited_urls should store normalized URLs
-                        # Ensure the link is truly under the crawl_root_url_prefix before adding to queue
-                        normalized_crawl_root = normalize_url_for_tracking(start_url)
-                        if normalized_link.startswith(normalized_crawl_root): # Corrected condition
-                            visited_urls.add(normalized_link) # Add normalized link to visited_urls
-                            urls_to_visit.append(normalized_link) # Add normalized link to queue
-                            # print(f"  Queued: {normalized_link}")
-            except requests.exceptions.RequestException as e:
-                print(f"Failed to fetch HTML for link discovery from {current_url}: {e}")
+            print(f"Skipping {current_url_to_convert} due to fetch error or empty content from Jina API.")
+            # No link discovery here anymore, as it's done upfront.
         
-        if not urls_to_visit and processed_pages_count < args.max_pages:
-            print("No more URLs to visit.")
+    # The old while loop and its internal link discovery logic are removed.
+    # while urls_to_visit and processed_pages_count < args.max_pages:
+    #    current_url = urls_to_visit.popleft()
+    #    ... (old logic removed) ...
+
 
     if not all_markdown_content:
         print("No content was successfully retrieved and converted.")
