@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urlunparse, urldefrag # Added urlunparse, urldefrag
 import collections
+import re # Added import re
 
 def fetch_content_from_jina_api(url: str, api_key: str) -> str:
     """
@@ -198,6 +199,113 @@ def crawl_and_list_internal_links(start_url: str, max_depth: int):
         print("No internal links found.")
         print("--- End of Link Discovery Report ---")
 
+# New function to generate a safe local filepath from a URL
+def generate_local_filepath(normalized_url: str, output_dir: str) -> str:
+    parsed_url = urlparse(normalized_url)
+    
+    filename_base = parsed_url.netloc
+    path_cleaned = parsed_url.path.strip('/') 
+    
+    if path_cleaned:
+        path_segments = path_cleaned.split('/')
+        last_segment = path_segments[-1]
+        
+        # Check if the last segment has a common web extension
+        if '.' in last_segment:
+            name_part, ext_part = os.path.splitext(last_segment)
+            if ext_part.lower() in ['.html', '.htm']:
+                if name_part: # If "index.html" becomes "index"
+                    path_segments[-1] = name_part
+                else: # If ".html" was the segment or became empty after stripping
+                    path_segments.pop() # Remove empty segment
+                    if not path_segments: # If path becomes empty (e.g. /index.html)
+                         filename_base += "_index" # Handled by else block later if path_cleaned is now empty
+        
+        # Reconstruct cleaned path part
+        # Filter out empty segments that might arise if a segment was e.g. "index.html" and became empty
+        valid_segments = [seg for seg in path_segments if seg]
+        if valid_segments:
+            filename_base += "_" + "_".join(valid_segments)
+        elif parsed_url.path.strip('/'): # Original path was not empty, but segments are now (e.g. /index.html)
+            filename_base += "_index"
+            
+    else: # Root URL (e.g. http://example.com/)
+        filename_base += "_index"
+        
+    # Sanitize the entire base name
+    # Allow alphanumeric, underscore, hyphen. Replace others with underscore.
+    safe_filename_base = re.sub(r'[^a-zA-Z0-9_-]', '_', filename_base)
+    # Replace multiple underscores with a single underscore
+    safe_filename_base = re.sub(r'_+', '_', safe_filename_base)
+    # Remove leading/trailing underscores
+    safe_filename_base = safe_filename_base.strip('_')
+
+    if not safe_filename_base: # Should be rare, but as a fallback
+        safe_filename_base = "untitled_page"
+
+    final_filename = safe_filename_base + ".md"
+    return os.path.join(output_dir, final_filename)
+
+# New function to convert internal links in Markdown to relative paths
+def convert_markdown_links(
+    markdown_content: str, 
+    current_page_normalized_url: str, 
+    url_to_filepath_map: dict
+) -> str:
+    
+    def replace_link(match):
+        link_text = match.group(1)
+        original_href = match.group(2)
+
+        # Resolve the href against the current page's URL to get an absolute URL
+        # current_page_normalized_url is the base for resolving relative links in its content
+        absolute_href = urljoin(current_page_normalized_url, original_href)
+        
+        # Separate fragment
+        abs_url_no_frag, fragment = urldefrag(absolute_href)
+        
+        # Normalize this absolute URL to match the style of keys in url_to_filepath_map
+        normalized_linked_url = normalize_url_for_tracking(abs_url_no_frag)
+
+        if normalized_linked_url in url_to_filepath_map:
+            # This is an internal link that we have downloaded
+            target_local_abs_path = url_to_filepath_map[normalized_linked_url]
+            
+            # current_page_normalized_url is already normalized and is a key in url_to_filepath_map
+            current_page_abs_path = url_to_filepath_map[current_page_normalized_url]
+            current_page_dir = os.path.dirname(current_page_abs_path)
+            
+            if not current_page_dir: # If current page is in the root of output_dir
+                current_page_dir = "." # os.path.relpath needs a start dir
+
+            relative_path = os.path.relpath(target_local_abs_path, start=current_page_dir)
+            # Ensure POSIX-style separators for Markdown links, even on Windows
+            relative_path = relative_path.replace(os.sep, '/')
+
+            new_href = relative_path
+            if fragment:
+                new_href += "#" + fragment
+            return f"[{link_text}]({new_href})"
+        else:
+            # External link or link to a page not in our set, leave as is
+            return match.group(0)
+
+    # Regex to find Markdown links: [text](url)
+    # It handles various characters in link text and URL.
+    link_pattern = r'\\[([^\\]\\[\\]]*)\\]\\(([^\\)]*)\\)' # Escaped for Python string
+    # Simpler pattern if complex link texts are not an issue: r'\[([^\]]*)\]\(([^)]+)\)'
+    # Using a more robust pattern for common markdown links:
+    link_pattern = r'\[(.*?)\]\((.*?)\)'
+
+
+    try:
+        processed_content = re.sub(link_pattern, replace_link, markdown_content)
+        return processed_content
+    except Exception as e:
+        print(f"  Error during link conversion for {current_page_normalized_url}: {e}")
+        return markdown_content # Return original content if conversion fails
+
+
 def main():
     load_dotenv()
 
@@ -205,9 +313,9 @@ def main():
         description="Convert a ReadTheDocs-like website to Markdown or list internal links with crawling."
     )
     parser.add_argument("url", nargs='?', default=None, help="The starting URL for conversion (required if not using --list-links).")
-    parser.add_argument("-o", "--output", default="output.md", help="The name of the output Markdown file (default: output.md).")
+    # Modified --output argument
+    parser.add_argument("-o", "--output", default="markdown_output", help="The output directory for Markdown files (default: markdown_output).")
     parser.add_argument("--api_key", help="Jina AI API Key. If not provided, it will try to use the JINA_AI_API_KEY environment variable.")
-    # parser.add_argument("--max_pages", type=int, default=10, help="Maximum number of pages to crawl and convert for Markdown generation (default: 10).") # Removed
     parser.add_argument("--list-links", metavar="URL", help="Fetch the specified URL and list all discoverable internal links by crawling, then exit.")
     parser.add_argument("--crawl-depth", type=int, default=0, help="Depth for link discovery when using --list-links or for Markdown conversion. 0 means only links on the initial page, 1 means links on those pages too, etc. (default: 0).")
 
@@ -238,25 +346,25 @@ def main():
     else:
         start_url = args.url
 
-    all_markdown_content = []
-    # Use a deque for BFS traversal # This comment is no longer relevant here
-    # urls_to_visit = collections.deque([start_url]) # Removed
-    # Set to keep track of URLs that have been added to the queue (to avoid re-adding) # This comment is no longer relevant here
-    # or have been processed. # This comment is no longer relevant here
-    # visited_urls = {start_url} # Removed
+    # Create output directory
+    output_dir = args.output
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"Markdown files will be saved in: {os.path.abspath(output_dir)}")
+    except OSError as e:
+        print(f"Error creating output directory {output_dir}: {e}")
+        return
+
+    # all_markdown_content = [] # Removed: content will be saved to individual files
 
     print(f"Starting conversion for: {start_url}, with crawl depth: {args.crawl_depth}")
     
-    # processed_pages_count = 0 # Will be re-introduced for iterating through discovered links
-
-    # 1. Discover all links based on crawl_depth
     print("Discovering all pages to convert...")
-    # User agent for link discovery in conversion mode, as previously used in main's crawler part.
     links_to_convert = _get_discovered_links(
         start_url,
         args.crawl_depth,
-        user_agent="Mozilla/5.0 (compatible; PythonDocsCrawler/1.0)", # UA from original main crawler
-        enable_logging=True # Set to False if link discovery phase should be quieter
+        user_agent="Mozilla/5.0 (compatible; PythonDocsCrawler/1.0)", 
+        enable_logging=True 
     )
 
     if not links_to_convert:
@@ -265,41 +373,51 @@ def main():
 
     print(f"Found {len(links_to_convert)} unique pages to convert.")
 
-    processed_pages_count = 0
-    # Sort links for consistent processing order, though not strictly necessary
-    for current_url_to_convert in sorted(list(links_to_convert)):
-        # The max_pages limit is removed; all discovered links up to crawl_depth are processed.
-        print(f"Processing page ({processed_pages_count + 1}/{len(links_to_convert)}): {current_url_to_convert}")
+    # Build URL to local filepath map
+    url_to_filepath_map = {}
+    for norm_url in links_to_convert:
+        url_to_filepath_map[norm_url] = generate_local_filepath(norm_url, output_dir)
 
-        # Fetch Markdown content for the current page using Jina API
+    processed_pages_count = 0
+    for current_url_to_convert in sorted(list(links_to_convert)):
+        print(f"Processing page ({processed_pages_count + 1}/{len(links_to_convert)}): {current_url_to_convert}")
+        
+        local_filepath = url_to_filepath_map[current_url_to_convert]
+
         markdown_page_content = fetch_content_from_jina_api(current_url_to_convert, api_key)
         
         if markdown_page_content:
-            all_markdown_content.append(f"\n\n--- Page Source: {current_url_to_convert} ---\n\n{markdown_page_content}")
-            processed_pages_count += 1
+            # Convert internal links to relative paths
+            print(f"  Converting internal links for: {current_url_to_convert}")
+            converted_markdown = convert_markdown_links(
+                markdown_page_content, 
+                current_url_to_convert, # This is already normalized from _get_discovered_links
+                url_to_filepath_map
+            )
+            
+            try:
+                with open(local_filepath, "w", encoding="utf-8") as f:
+                    f.write(converted_markdown)
+                print(f"  Successfully saved Markdown to: {local_filepath}")
+                processed_pages_count += 1
+            except IOError as e:
+                print(f"  Error writing Markdown to file {local_filepath}: {e}")
         else:
-            print(f"Skipping {current_url_to_convert} due to fetch error or empty content from Jina API.")
-            # No link discovery here anymore, as it's done upfront.
+            print(f"  Skipping {current_url_to_convert} due to fetch error or empty content from Jina API.")
         
-    # The old while loop and its internal link discovery logic are removed.
-    # while urls_to_visit and processed_pages_count < args.max_pages:
-    #    current_url = urls_to_visit.popleft()
-    #    ... (old logic removed) ...
-
-
-    if not all_markdown_content:
-        print("No content was successfully retrieved and converted.")
+    if processed_pages_count == 0:
+        print("\nNo content was successfully retrieved and converted.")
         return
 
-    final_markdown = "\n".join(all_markdown_content)
-    print(f"\nTotal pages processed and content appended: {processed_pages_count}")
-    print(f"Saving aggregated Markdown to {args.output}...")
-    try:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(final_markdown)
-        print("Conversion complete.")
-    except IOError as e:
-        print(f"Error writing to file {args.output}: {e}")
+    # final_markdown = "\n".join(all_markdown_content) # Removed
+    print(f"\nTotal pages processed and saved: {processed_pages_count}")
+    # print(f"Saving aggregated Markdown to {args.output}...") # Removed
+    # try: # Removed
+    #     with open(args.output, "w", encoding="utf-8") as f: # Removed
+    #         f.write(final_markdown) # Removed
+    print("Conversion complete. Markdown files are in:", os.path.abspath(output_dir))
+    # except IOError as e: # Removed
+    #     print(f"Error writing to file {args.output}: {e}") # Removed
 
 if __name__ == "__main__":
     main()
