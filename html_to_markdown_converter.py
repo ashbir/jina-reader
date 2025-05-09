@@ -75,48 +75,80 @@ def find_internal_links(html_content: str, base_url: str) -> set[str]:
                 links.add(full_url)
     return links
 
-def list_internal_links_from_url(page_url: str):
-    """Fetches HTML from a URL, finds internal links, and prints them."""
-    print(f"Fetching HTML from {page_url} to list internal links...")
-    try:
-        html_response_headers = {"User-Agent": "Mozilla/5.0 (compatible; PythonLinkLister/1.0)"}
-        response = requests.get(page_url, timeout=30, headers=html_response_headers)
-        response.raise_for_status()
-        page_html_content = response.text
-        
-        internal_links = find_internal_links(page_html_content, page_url)
-        
-        if internal_links:
-            print(f"\nFound {len(internal_links)} internal link(s) on {page_url}:")
-            for link in sorted(list(internal_links)):
-                print(link)
-        else:
-            print(f"No internal links found on {page_url}.")
+def crawl_and_list_internal_links(start_url: str, max_depth: int):
+    """Crawls a website starting from start_url up to max_depth and lists all unique internal links found."""
+    print(f"Starting link discovery crawl from: {start_url} up to depth: {max_depth}")
+
+    # (url, current_depth)
+    urls_to_visit = collections.deque([(start_url, 0)]) 
+    # URLs we have added to queue to fetch its content, to avoid re-fetching for link extraction
+    visited_urls_for_fetching = {start_url} 
+    # All unique links encountered during the crawl (includes pages visited and links found on them)
+    all_discovered_links = set()
+
+    while urls_to_visit:
+        current_url, current_depth = urls_to_visit.popleft()
+        all_discovered_links.add(current_url) # Add the page being processed as a discovered link
+
+        print(f"Fetching links from: {current_url} (depth {current_depth}) ")
+        try:
+            html_response_headers = {"User-Agent": "Mozilla/5.0 (compatible; PythonLinkCrawler/1.1)"}
+            response = requests.get(current_url, timeout=30, headers=html_response_headers)
+            response.raise_for_status()
+            page_html_content = response.text
             
-    except requests.exceptions.RequestException as e:
-        print(f"Failed to fetch HTML from {page_url}: {e}")
+            # Find links on the current page
+            links_on_page = find_internal_links(page_html_content, current_url)
+            all_discovered_links.update(links_on_page) # Add all links found on this page
+
+            # If we haven't reached max_depth, add new unvisited links to the queue
+            if current_depth < max_depth:
+                for link in links_on_page:
+                    if link not in visited_urls_for_fetching:
+                        visited_urls_for_fetching.add(link)
+                        urls_to_visit.append((link, current_depth + 1))
+                        # print(f"  Queued for depth {current_depth + 1}: {link}")
+                        
+        except requests.exceptions.RequestException as e:
+            print(f"  Failed to fetch HTML from {current_url}: {e}")
+        except Exception as e:
+            print(f"  An unexpected error occurred while processing {current_url}: {e}")
+
+    if all_discovered_links:
+        print(f"\n--- Discovered {len(all_discovered_links)} unique internal links (up to depth {max_depth}) ---")
+        for link in sorted(list(all_discovered_links)):
+            print(link)
+        print("--- End of link list ---")
+    else:
+        print("No internal links found.")
 
 def main():
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Convert a ReadTheDocs-like website to a single Markdown file using the Jina AI Reader API or list internal links."
+        description="Convert a ReadTheDocs-like website to Markdown or list internal links with crawling."
     )
     parser.add_argument("url", nargs='?', default=None, help="The starting URL for conversion (required if not using --list-links).")
     parser.add_argument("-o", "--output", default="output.md", help="The name of the output Markdown file (default: output.md).")
     parser.add_argument("--api_key", help="Jina AI API Key. If not provided, it will try to use the JINA_AI_API_KEY environment variable.")
-    parser.add_argument("--max_pages", type=int, default=10, help="Maximum number of pages to crawl and convert (default: 10).")
-    parser.add_argument("--list-links", metavar="URL", help="Fetch the specified URL and list all discoverable internal links, then exit.")
+    parser.add_argument("--max_pages", type=int, default=10, help="Maximum number of pages to crawl and convert for Markdown generation (default: 10).")
+    parser.add_argument("--list-links", metavar="URL", help="Fetch the specified URL and list all discoverable internal links by crawling, then exit.")
+    parser.add_argument("--crawl-depth", type=int, default=0, help="Depth for link discovery when using --list-links. 0 means only links on the initial page, 1 means links on those pages too, etc. (default: 0).")
 
     args = parser.parse_args()
 
     if args.list_links:
-        list_internal_links_from_url(args.list_links)
+        # Ensure URL starts with http/https for list-links mode as well
+        list_start_url = args.list_links
+        if not list_start_url.startswith("http://") and not list_start_url.startswith("https://"):
+            print(f"Warning: URL for --list-links ({list_start_url}) does not start with http:// or https://. Prepending https://")
+            list_start_url = "https://" + list_start_url
+        
+        crawl_and_list_internal_links(list_start_url, args.crawl_depth)
         return
 
     if not args.url:
         parser.error("the following arguments are required: url (unless --list-links is used)")
-        return
 
     api_key = args.api_key or os.getenv("JINA_AI_API_KEY")
 
