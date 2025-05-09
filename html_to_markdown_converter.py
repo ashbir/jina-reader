@@ -3,7 +3,7 @@ import requests
 import os
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, urlunparse, urldefrag # Added urlunparse, urldefrag
+from urllib.parse import urljoin, urlparse, urlunparse, urldefrag, parse_qs, urlencode # Added urlunparse, urldefrag, parse_qs, urlencode
 import collections
 import re # Added import re
 
@@ -47,11 +47,22 @@ def normalize_url_for_tracking(url_str: str) -> str:
     - Removes fragments.
     - Removes common index files (index.html, index.htm).
     - Ensures consistent trailing slashes for directory-like paths.
+    - Removes specific query parameters like 'rev', and 'do' (e.g. 'do=revisions', 'do=diff').
     """
     url_no_frag, _ = urldefrag(url_str) 
     parsed = urlparse(url_no_frag)
     path = parsed.path
+    query_original = parsed.query
 
+    # Process query parameters to remove revision-related ones
+    query_new = ''
+    if query_original:
+        params = parse_qs(query_original, keep_blank_values=True)
+        # Parameters to remove. 'rev' for revision numbers, 'do' for actions like 'revisions' or 'diff'.
+        keys_to_remove = ['rev', 'do']
+        filtered_params = {k: v for k, v in params.items() if k not in keys_to_remove}
+        query_new = urlencode(filtered_params, doseq=True)
+    
     # Remove /index.html or /index.htm from the end of the path
     if path.lower().endswith("/index.html"):
         path = path[:-10] # len("index.html")
@@ -69,7 +80,7 @@ def normalize_url_for_tracking(url_str: str) -> str:
         if last_segment and '.' not in last_segment: 
             path += "/"
             
-    return urlunparse(parsed._replace(path=path))
+    return urlunparse(parsed._replace(path=path, query=query_new)) # Use new query
 
 def find_internal_links(html_content: str, base_url: str, crawl_root_url_prefix: str) -> set[str]: # Added crawl_root_url_prefix
     """Parses HTML and extracts internal links relevant for documentation sites."""
