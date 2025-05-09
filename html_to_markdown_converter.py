@@ -2,9 +2,9 @@ import argparse
 import requests
 import os
 from dotenv import load_dotenv
-from bs4 import BeautifulSoup  # Added
-from urllib.parse import urljoin, urlparse  # Added
-import collections # Added
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse, urlunparse, urldefrag # Added urlunparse, urldefrag
+import collections
 
 def fetch_content_from_jina_api(url: str, api_key: str) -> str:
     """
@@ -41,30 +41,53 @@ def fetch_content_from_jina_api(url: str, api_key: str) -> str:
             print(f"Response text: {e.response.text}")
         return None
 
-def find_internal_links(html_content: str, base_url: str) -> set[str]:
+def normalize_url_for_tracking(url_str: str) -> str:
+    """Normalizes a URL for tracking and comparison purposes.
+    - Removes fragments.
+    - Removes common index files (index.html, index.htm).
+    - Ensures consistent trailing slashes for directory-like paths.
+    """
+    url_no_frag, _ = urldefrag(url_str) 
+    parsed = urlparse(url_no_frag)
+    path = parsed.path
+
+    # Remove /index.html or /index.htm from the end of the path
+    if path.lower().endswith("/index.html"):
+        path = path[:-10] # len("index.html")
+    elif path.lower().endswith("/index.htm"):
+        path = path[:-9] # len("index.htm")
+    
+    # If path becomes empty after removing index.html (e.g. "http://example.com/index.html"), set to "/"
+    if not path:
+        path = "/"
+    
+    # Add trailing slash if it's directory-like (not root, doesn't end with slash, last segment has no dot)
+    if path != "/" and not path.endswith("/"):
+        last_segment = path.split('/')[-1]
+        # Only add slash if last_segment is not empty (e.g. not for "http://example.com") and has no dot
+        if last_segment and '.' not in last_segment: 
+            path += "/"
+            
+    return urlunparse(parsed._replace(path=path))
+
+def find_internal_links(html_content: str, base_url: str, crawl_root_url_prefix: str) -> set[str]: # Added crawl_root_url_prefix
     """Parses HTML and extracts internal links relevant for documentation sites."""
     links = set()
     soup = BeautifulSoup(html_content, 'html.parser')
-    parsed_base_url = urlparse(base_url)
+    parsed_base_url = urlparse(base_url) 
 
     for a_tag in soup.find_all('a', href=True):
         href = a_tag['href']
         full_url = urljoin(base_url, href)
-        parsed_full_url = urlparse(full_url)
+        normalized_full_url = normalize_url_for_tracking(full_url)
+        parsed_normalized_full_url = urlparse(normalized_full_url)
 
-        # Filter for relevant links:
-        # 1. Must be http or https
-        # 2. Must be on the same domain as the base_url
-        # 3. Not a fragment link on the same page (e.g., #section)
-        # 4. Path should not be identical (already processed or is base_url itself)
-        # 5. Typically documentation links end with .html, no extension, or /
-        if (parsed_full_url.scheme in ['http', 'https'] and
-                parsed_full_url.netloc == parsed_base_url.netloc and
-                full_url != base_url and
-                not parsed_full_url.fragment):
+        if (parsed_normalized_full_url.scheme in ['http', 'https'] and
+                parsed_normalized_full_url.netloc == parsed_base_url.netloc and
+                normalized_full_url != base_url and # Compare normalized forms
+                normalized_full_url.startswith(crawl_root_url_prefix)): # New check for parent path restriction
             
-            # Check if it looks like a document page
-            path_part = parsed_full_url.path.strip('/')
+            path_part = parsed_normalized_full_url.path.strip('/')
             if not path_part: # Root path, if different from base_url, could be relevant
                  links.add(full_url)
                  continue
@@ -98,7 +121,7 @@ def crawl_and_list_internal_links(start_url: str, max_depth: int):
             page_html_content = response.text
             
             # Find links on the current page
-            links_on_page = find_internal_links(page_html_content, current_url)
+            links_on_page = find_internal_links(page_html_content, current_url, start_url) # Pass normalized_start_url as crawl_root_url_prefix
             all_discovered_links.update(links_on_page) # Add all links found on this page
 
             # If we haven't reached max_depth, add new unvisited links to the queue
@@ -208,9 +231,10 @@ def main():
                 response.raise_for_status()
                 page_html_content = response.text
                 
-                internal_links = find_internal_links(page_html_content, current_url)
+                # Pass start_url (which is the normalized root for this crawl) as crawl_root_url_prefix
+                internal_links = find_internal_links(page_html_content, current_url, start_url) 
                 print(f"Found {len(internal_links)} potential links on {current_url}.")
-                for link in internal_links:
+                for link in internal_links: 
                     if link not in visited_urls:
                         visited_urls.add(link)
                         urls_to_visit.append(link)
